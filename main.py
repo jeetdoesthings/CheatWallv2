@@ -12,11 +12,14 @@ from threading import Thread
 import re
 
 # **User-defined whitelisted processes**
-WHITELISTED_PROCESSES = []
+# Get user-defined whitelisted processes (from Task Manager "Details" tab)
+WHITELISTED_PROCESSES = ["code.exe"]  # ✅ Default whitelist includes Code.exe
+
 def get_user_whitelisted_processes():
     global WHITELISTED_PROCESSES
-    processes = input("Enter whitelisted processes (comma-separated, e.g., code.exe, python.exe): ")
-    WHITELISTED_PROCESSES = [proc.strip().lower() for proc in processes.split(",")]
+    processes = input("Enter additional whitelisted processes (comma-separated, e.g., python.exe, chrome.exe): ")
+    user_whitelist = [proc.strip().lower() for proc in processes.split(",")]
+    WHITELISTED_PROCESSES.extend(user_whitelist)  # ✅ Merge user inputs with default whitelist
     print(f"Whitelisted Processes: {WHITELISTED_PROCESSES}")
 
 get_user_whitelisted_processes()
