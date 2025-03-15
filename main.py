@@ -13,7 +13,7 @@ import re
 
 # **User-defined whitelisted processes**
 # Get user-defined whitelisted processes (from Task Manager "Details" tab)
-WHITELISTED_PROCESSES = ["code.exe"]  # ✅ Default whitelist includes Code.exe
+WHITELISTED_PROCESSES = ["code.exe","python.exe","pythonw.exe"]  # ✅ Default whitelist includes Code.exe
 
 def get_user_whitelisted_processes():
     global WHITELISTED_PROCESSES
@@ -112,7 +112,7 @@ def monitor_processes():
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
 
-        time.sleep(2)
+        time.sleep(0.1)
 
 # **Clipboard Monitoring**
 def monitor_clipboard():
@@ -127,7 +127,7 @@ def monitor_clipboard():
                 take_screenshot(process_name, window_handle, window_title, "Clipboard Activity Detected")
         except Exception as e:
             print(f"Clipboard Monitoring Error: {str(e)}")
-        time.sleep(1)
+        time.sleep(0.1)
 
 # **Tab Switch Detection**
 # **Tab Switch & Window Switch Detection (Multi-tab Apps)**
@@ -139,7 +139,7 @@ last_process_name = None
 known_windows = {}
 
 def detect_tab_switches():
-    global last_window_handle, last_window_title, last_process_name, known_windows
+    global last_window_handle, last_window_title, last_process_name
 
     while True:
         process_name, window_handle, window_title = get_active_window()
@@ -158,20 +158,16 @@ def detect_tab_switches():
             take_screenshot(process_name, window_handle, window_title, "Window Switch Detected")
 
         # **Detect tab switches within the same app**
-        elif process_name in known_windows:  
-            if window_title not in known_windows[process_name]:  # If a new tab appears
-                log_event("Tab Switch Detected", process_name, window_handle, window_title, "", "", "Suspicious Activity")
-                take_screenshot(process_name, window_handle, window_title, "Tab Switch Detected")
-                known_windows[process_name].append(window_title)  # Track opened tabs
-        else:
-            known_windows[process_name] = [window_title]  # Initialize tracking
+        elif window_handle == last_window_handle and window_title != last_window_title:
+            log_event("Tab Switch Detected", process_name, window_handle, window_title, "", "", "Suspicious Activity")
+            take_screenshot(process_name, window_handle, window_title, "Tab Switch Detected")
 
         # **Update last known values**
         last_window_handle = window_handle
         last_window_title = window_title
         last_process_name = process_name
 
-        time.sleep(0.5)  # Faster detection
+        time.sleep(0.05)  # Small delay to prevent high CPU usage
 
 
 # **Get Active Window Process Name**
@@ -200,7 +196,7 @@ def monitor_network():
                     log_event("Network Activity", process_name, window_handle, window_title, remote_ip, domain, "Monitoring")
         except Exception as e:
             print(f"Network Monitoring Error: {str(e)}")
-        time.sleep(5)
+        time.sleep(0.1)
 
 # **Resolve IP to Domain Name**
 def get_domain_from_ip(ip):
