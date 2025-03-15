@@ -9,6 +9,7 @@ import win32process
 import socket
 from pynput import keyboard, mouse
 from threading import Thread
+import re
 
 # **User-defined whitelisted processes**
 WHITELISTED_PROCESSES = []
@@ -59,10 +60,21 @@ def is_process_visible(pid):
 def take_screenshot(process_name, window_handle, window_title, reason):
     if reason in ["Tab Switch Detected", "Unauthorized Process Detected", "Clipboard Activity Detected", "Suspicious Keystroke"]:
         timestamp = time.strftime('%Y%m%d_%H%M%S')
-        filename = f"screenshots/{process_name}-{window_title}-{reason}-{timestamp}.png"
+
+        # **Sanitize window title to remove invalid filename characters**
+        safe_window_title = re.sub(r'[\/:*?"<>|]', '_', window_title)[:50]  # Limit length to 50 chars
+
+        # **Ensure screenshots folder exists**
         os.makedirs("screenshots", exist_ok=True)
+
+        # **Generate filename**
+        filename = f"screenshots/{process_name}-{safe_window_title}-{reason}-{timestamp}.png"
+
+        # **Take & Save Screenshot**
         screenshot = pyautogui.screenshot()
         screenshot.save(filename)
+
+        # **Log Screenshot Event**
         log_event("Screenshot Taken", process_name, window_handle, window_title, "", "", reason)
 
 # **Logging Function**
@@ -116,32 +128,48 @@ def monitor_clipboard():
 
 # **Tab Switch Detection**
 # **Tab Switch & Window Switch Detection (Multi-tab Apps)**
-tracked_apps = ["chrome.exe", "msedge.exe", "firefox.exe", "code.exe", "pycharm64.exe"]
+# **Enhanced Universal Tab & Window Switch Detection**
+# Global Variables
 last_window_handle = None
 last_window_title = None
 last_process_name = None
+known_windows = {}
 
 def detect_tab_switches():
-    global last_window_handle, last_window_title, last_process_name
+    global last_window_handle, last_window_title, last_process_name, known_windows
 
     while True:
         process_name, window_handle, window_title = get_active_window()
 
-        if process_name:
-            if process_name in tracked_apps:
-                if window_handle == last_window_handle and window_title != last_window_title:
-                    log_event("Tab Switch Detected", process_name, window_handle, window_title, "", "", "Suspicious Activity")
-                    take_screenshot(process_name, window_handle, window_title, "Tab Switch Detected")
-
-            elif window_handle != last_window_handle:
-                log_event("Window Switch Detected", process_name, window_handle, window_title, "", "", "Suspicious Activity")
-                take_screenshot(process_name, window_handle, window_title, "Window Switch Detected")
-
-            last_window_handle = window_handle
-            last_window_title = window_title
+        # Ensure we have initialized values
+        if last_process_name is None:
             last_process_name = process_name
+        if last_window_handle is None:
+            last_window_handle = window_handle
+        if last_window_title is None:
+            last_window_title = window_title
 
-        time.sleep(0.5)  # Fast detection for better accuracy
+        # **Detect a new app window (window switch)**
+        if process_name != last_process_name:
+            log_event("Window Switch Detected", process_name, window_handle, window_title, "", "", "Suspicious Activity")
+            take_screenshot(process_name, window_handle, window_title, "Window Switch Detected")
+
+        # **Detect tab switches within the same app**
+        elif process_name in known_windows:  
+            if window_title not in known_windows[process_name]:  # If a new tab appears
+                log_event("Tab Switch Detected", process_name, window_handle, window_title, "", "", "Suspicious Activity")
+                take_screenshot(process_name, window_handle, window_title, "Tab Switch Detected")
+                known_windows[process_name].append(window_title)  # Track opened tabs
+        else:
+            known_windows[process_name] = [window_title]  # Initialize tracking
+
+        # **Update last known values**
+        last_window_handle = window_handle
+        last_window_title = window_title
+        last_process_name = process_name
+
+        time.sleep(0.5)  # Faster detection
+
 
 # **Get Active Window Process Name**
 def get_active_window():
