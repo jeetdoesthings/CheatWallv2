@@ -13,7 +13,7 @@ import re
 
 # **User-defined whitelisted processes**
 # Get user-defined whitelisted processes (from Task Manager "Details" tab)
-WHITELISTED_PROCESSES = ["code.exe","python.exe","pythonw.exe"]  # ✅ Default whitelist includes Code.exe
+WHITELISTED_PROCESSES = ["WindowsTerminal.exe","OpenConsole.exe","gui.exe","code.exe","notepad.exe","chrome.exe"]  # ✅ Default whitelist includes Code.exe
 
 def get_user_whitelisted_processes():
     global WHITELISTED_PROCESSES
@@ -98,15 +98,23 @@ def monitor_processes():
                 process_pid = process.info['pid']
                 process_real_name = os.path.basename(process_path).lower() if process_path else process_name
 
-                if process_real_name in CRITICAL_SYSTEM_PROCESSES or process_real_name in WHITELISTED_PROCESSES:
+                # Log the process being checked
+                log_event("Process Checked", process_real_name, "", "", "", "", "Checked")
+
+                if process_real_name in [p.lower() for p in CRITICAL_SYSTEM_PROCESSES]:
                     continue
 
                 if not is_process_visible(process_pid):
                     continue  
 
-                log_event("Unauthorized Process Detected", process_real_name, "", "", "", "", "Terminated")
-                take_screenshot(process_real_name, "", "", "Unauthorized Process Detected")
-                psutil.Process(process_pid).terminate()
+                parent = psutil.Process(process_pid).parent()
+                if parent and parent.name().lower() in [p.lower() for p in WHITELISTED_PROCESSES]:
+                    continue
+
+                if process_real_name not in [p.lower() for p in WHITELISTED_PROCESSES]:
+                    log_event("Unauthorized Process Detected", process_real_name, "", "", "", "", "Terminated")
+                    take_screenshot(process_real_name, "", "", "Unauthorized Process Detected")
+                    psutil.Process(process_pid).terminate()
                 time.sleep(1)
 
             except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -155,7 +163,9 @@ def detect_tab_switches():
         # **Detect a new app window (window switch)**
         if process_name != last_process_name:
             log_event("Window Switch Detected", process_name, window_handle, window_title, "", "", "Suspicious Activity")
-            take_screenshot(process_name, window_handle, window_title, "Window Switch Detected")
+            # Take a screenshot only if the new process is not python3.11.exe
+            if process_name != "python3.11.exe":
+                take_screenshot(process_name, window_handle, window_title, "Window Switch Detected")
 
         # **Detect tab switches within the same app**
         elif window_handle == last_window_handle and window_title != last_window_title:
@@ -228,6 +238,7 @@ def start_monitoring():
     for thread in threads:
         thread.start()
 
+
     with keyboard.Listener(on_press=on_key_press) as key_listener, \
          mouse.Listener(on_click=on_click) as mouse_listener:
         key_listener.join()
@@ -235,4 +246,4 @@ def start_monitoring():
 
 if __name__ == '__main__':
     print("\nStarting Student Proctoring System...\n")
-    start_monitoring()
+    start_monitoring()  # ✅ Will only run if main.py is executed directly
