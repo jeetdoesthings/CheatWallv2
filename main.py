@@ -8,242 +8,319 @@ import win32gui
 import win32process
 import socket
 from pynput import keyboard, mouse
-from threading import Thread
+import threading
 import re
+import tldextract
+from risk_score import risk_queue, warning_queue
+from tkinter import messagebox
+from risk_score import start_risk_monitoring, risk_queue
+import queue
+event_stream = queue.Queue()
+from PIL import ImageGrab
+import ctypes
+import ctypes.wintypes
+tld_extractor = tldextract.TLDExtract(include_psl_private_domains=True)
 
-# **User-defined whitelisted processes**
-# Get user-defined whitelisted processes (from Task Manager "Details" tab)
-WHITELISTED_PROCESSES = ["WindowsTerminal.exe","OpenConsole.exe","gui.exe","code.exe","notepad.exe","chrome.exe"]  # ✅ Default whitelist includes Code.exe
+# ✅ User-defined whitelisted processes (converted to lowercase)
+WHITELISTED_PROCESSES = [
+    "windowsterminal.exe", "openconsole.exe", "gui.exe", "code.exe", 
+    "notepad.exe", "chrome.exe", "python3.11.exe"
+]
 
-def get_user_whitelisted_processes():
-    global WHITELISTED_PROCESSES
-    processes = input("Enter additional whitelisted processes (comma-separated, e.g., python.exe, chrome.exe): ")
-    user_whitelist = [proc.strip().lower() for proc in processes.split(",")]
-    WHITELISTED_PROCESSES.extend(user_whitelist)  # ✅ Merge user inputs with default whitelist
-    print(f"Whitelisted Processes: {WHITELISTED_PROCESSES}")
+# ✅ Critical System Processes (Never Terminate)
+CRITICAL_SYSTEM_PROCESSES = [
+    "explorer.exe", "winlogon.exe", "taskmgr.exe", "csrss.exe", "services.exe",
+    "svchost.exe", "lsass.exe", "dwm.exe", "system", "smss.exe", "textinputhost.exe"
+]
 
-get_user_whitelisted_processes()
-
-# **Logging setup**
+# ✅ Logging setup
 CSV_FILE = "activity_log.csv"
-HEADERS = ["Timestamp", "Event", "Process Name", "Window Handle", "Window Title", "IP Address", "Domain Name", "Action Taken"]
+HEADERS = [
+    "Timestamp", "Event Type", "Process Name", 
+    "Window Handle", "Window Title", 
+    "IP Address", "Domain Name", "Action Taken"
+]
 
 if not os.path.exists(CSV_FILE):
     with open(CSV_FILE, mode='w', newline='', encoding='utf-8') as file:
         writer = csv.writer(file)
         writer.writerow(HEADERS)
 
-# **Critical System Processes (Never Terminate)**
-CRITICAL_SYSTEM_PROCESSES = [
-    "explorer.exe", "winlogon.exe", "taskmgr.exe",
-    "csrss.exe", "services.exe", "svchost.exe", "lsass.exe",
-    "dwm.exe", "system", "smss.exe", "textinputhost.exe"
-]
+def get_current_desktop_number():
+    try:
+        hDesk = ctypes.windll.user32.GetThreadDesktop(ctypes.windll.kernel32.GetCurrentThreadId())
+        VIEW_OFFSET = 0x88  # Windows 10+ offset for desktop number
+        buffer = ctypes.create_string_buffer(4)
+        ctypes.windll.ntdll.NtQueryInformationProcess(
+            -1, 0x26, buffer, 4, None  # ProcessDesktopInformation
+        )
+        return int.from_bytes(buffer.raw, byteorder='little')
+    except:
+        return 1
+    
+# ✅ Log event function
+def log_event(event, process_name="", window_handle=None, window_title=None, ip_address="", domain="", action_taken=""):
+    """Logs all system activities in a CSV file and prints them to the console."""
+    timestamp = time.strftime('%d-%m-%Y %H:%M:%S')
 
-# **Global Variables**
-last_clipboard_content = ""
-last_window_handle = None
-last_window_title = None
+    # ✅ Ensure window handle and title are always fetched
+    if window_handle is None or window_title is None:
+        process_name, window_handle, window_title = get_active_window()
 
-# **Function to check if a process has an open (visible) window**
+    with open(CSV_FILE, mode='a', newline='', encoding='utf-8') as file:
+        writer = csv.writer(file)
+        writer.writerow([timestamp, event, process_name, window_handle, window_title, ip_address, domain, action_taken])
+
+    print(f"[{timestamp}] {event} | Process: {process_name} | Handle: {window_handle} | Window: {window_title} | IP: {ip_address} | Domain: {domain} | Action: {action_taken}")
+
 def is_process_visible(pid):
+    """Check if the process has an open (visible) window."""
     def callback(hwnd, visible_windows):
         if hwnd and win32gui.IsWindowVisible(hwnd):
             try:
                 _, process_id = win32process.GetWindowThreadProcessId(hwnd)
                 if process_id == pid:
-                    visible_windows.append(True)
+                    visible_windows.append(hwnd)
             except:
                 pass
     visible_windows = []
     win32gui.EnumWindows(callback, visible_windows)
     return bool(visible_windows)
 
-# **Screenshot Function**
-def take_screenshot(process_name, window_handle, window_title, reason):
-    if reason in ["Tab Switch Detected", "Unauthorized Process Detected", "Clipboard Activity Detected", "Suspicious Keystroke"]:
-        timestamp = time.strftime('%Y%m%d_%H%M%S')
-
-        # **Sanitize window title to remove invalid filename characters**
-        safe_window_title = re.sub(r'[\/:*?"<>|]', '_', window_title)[:50]  # Limit length to 50 chars
-
-        # **Ensure screenshots folder exists**
-        os.makedirs("screenshots", exist_ok=True)
-
-        # **Generate filename**
-        filename = f"screenshots/{process_name}-{safe_window_title}-{reason}-{timestamp}.png"
-
-        # **Take & Save Screenshot**
-        screenshot = pyautogui.screenshot()
-        screenshot.save(filename)
-
-        # **Log Screenshot Event**
-        log_event("Screenshot Taken", process_name, window_handle, window_title, "", "", reason)
-
-# **Logging Function**
-def log_event(event, process_name="", window_handle="", window_title="", ip_address="", domain="", action_taken=""):
-    timestamp = time.strftime('%d-%m-%Y %H:%M:%S')
-    with open(CSV_FILE, mode='a', newline='', encoding='utf-8') as file:
-        writer = csv.writer(file)
-        writer.writerow([timestamp, event, process_name, window_handle, window_title, ip_address, domain, action_taken])
-    print(f"[{timestamp}] {event} | Process: {process_name} | Handle: {window_handle} | Window: {window_title} | IP: {ip_address} | Domain: {domain} | Action: {action_taken}")
-
-# **Process Monitoring & Termination**
 def monitor_processes():
+    """Terminate only unauthorized processes that have a visible window."""
     while True:
-        for process in psutil.process_iter(['pid', 'exe', 'name']):
+        for process in psutil.process_iter(['pid', 'name']):
             try:
-                process_path = process.info.get('exe', None)
-                process_name = process.info.get('name', "").lower()
+                process_name = process.info['name'].lower()
                 process_pid = process.info['pid']
-                process_real_name = os.path.basename(process_path).lower() if process_path else process_name
 
-                # Log the process being checked
-                log_event("Process Checked", process_real_name, "", "", "", "", "Checked")
-
-                if process_real_name in [p.lower() for p in CRITICAL_SYSTEM_PROCESSES]:
+                # ✅ Ignore critical system processes
+                if process_name in [p.lower() for p in CRITICAL_SYSTEM_PROCESSES]:
                     continue
 
-                if not is_process_visible(process_pid):
-                    continue  
-
-                parent = psutil.Process(process_pid).parent()
-                if parent and parent.name().lower() in [p.lower() for p in WHITELISTED_PROCESSES]:
+                # ✅ Ignore whitelisted processes
+                if process_name in [p.lower() for p in WHITELISTED_PROCESSES]:
                     continue
 
-                if process_real_name not in [p.lower() for p in WHITELISTED_PROCESSES]:
-                    log_event("Unauthorized Process Detected", process_real_name, "", "", "", "", "Terminated")
-                    take_screenshot(process_real_name, "", "", "Unauthorized Process Detected")
+                # ✅ Only terminate processes with an open (visible) window
+                if is_process_visible(process_pid):
+                    process_name, window_handle, window_title = get_active_window()
+                    log_event("Unauthorized Process Detected", process_name, window_handle, window_title, "", "", "Terminated")
+                    log_suspicious_activity("Unauthorized Process")
                     psutil.Process(process_pid).terminate()
-                time.sleep(1)
 
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
 
+        time.sleep(0.05) 
+
+# ✅ Clipboard Monitoring
+
+
+def detect_tab_switches():
+    global last_window_handle, last_window_title
+    setup_screenshots()
+    last_desktop = get_current_desktop_number()
+    
+    while True:
+        try:
+            current_desktop = get_current_desktop_number()
+            if current_desktop != last_desktop:
+                take_screenshot("desktop_switch")
+                log_event("Desktop Switch", "", "", "", "", "", "Suspicious Activity")
+                last_desktop = current_desktop
+            
+            process_name, window_handle, window_title = get_active_window()
+            
+            if window_handle != last_window_handle or window_title != last_window_title:
+                take_screenshot("tab_switch")
+                log_event(
+                    "Tab Switch Detected",
+                    process_name,
+                    window_handle,
+                    window_title,
+                    action_taken="Suspicious Activity"
+                )
+                
+            last_window_handle = window_handle
+            last_window_title = window_title
+            
+        except Exception as e:
+            print(f"Tab switch error: {str(e)}")
+            
         time.sleep(0.1)
 
-# **Clipboard Monitoring**
+def get_domain_from_ip(ip_address):
+    """Improved domain simplification with AWS/GCP detection"""
+    try:
+        # First try reverse DNS
+        domain_name = socket.gethostbyaddr(ip_address)[0]
+        extracted = tld_extractor(domain_name)
+        
+        # Handle AWS/GCP domains
+        if 'compute.amazonaws' in domain_name:
+            parts = domain_name.split('.')
+            return f"{parts[-4]}.{'.'.join(parts[-3:])}" if len(parts) >=4 else domain_name
+        if 'googleusercontent' in domain_name:
+            return "googleusercontent.com"
+        
+        # Return simplified domain
+        if extracted.suffix:
+            return f"{extracted.domain}.{extracted.suffix}"
+        return extracted.domain if extracted.domain else ip_address
+    except (socket.herror, socket.gaierror):
+        return ip_address
+    except Exception as e:
+        print(f"Domain Error: {str(e)}")
+        return ip_address
+
+# Modified network monitoring section
+def monitor_network():
+    extract = tldextract.extract
+    while True:
+        try:
+            current_process, hwnd, window_title = get_active_window()
+            
+            for conn in psutil.net_connections(kind='inet'):
+                if conn.status == 'ESTABLISHED' and conn.raddr:
+                    try:
+                        process = psutil.Process(conn.pid)
+                        remote_ip = conn.raddr[0]
+                        remote_port = conn.raddr[1]
+                        
+                        # Get domain from browser title if possible
+                        domain = ""
+                        if "chrome.exe" in process.name().lower():
+                            if " - Google Chrome" in window_title:
+                                url_part = window_title.split(" - Google Chrome")[0]
+                                extracted = extract(url_part)
+                                domain = f"{extracted.domain}.{extracted.suffix}"
+                        elif "firefox.exe" in process.name().lower():
+                            if " - Mozilla Firefox" in window_title:
+                                url_part = window_title.split(" - Mozilla Firefox")[0]
+                                extracted = extract(url_part)
+                                domain = f"{extracted.domain}.{extracted.suffix}"
+                        
+                        # Fallback to DNS lookup
+                        if not domain:
+                            domain = get_domain_from_ip(remote_ip)
+
+                        # Log network activity separately
+                        log_event(
+                            "Network Connection",
+                            process.name(),
+                            hwnd,
+                            window_title,
+                            f"{remote_ip}:{remote_port}",
+                            domain,
+                            "Monitoring"
+                        )
+
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
+
+        except Exception as e:
+            print(f"Network monitoring error: {str(e)}")
+        
+        time.sleep(0.5)
+      
+last_window_handle = None
+last_window_title = None
+
 def monitor_clipboard():
     global last_clipboard_content
+    last_clipboard_content = ""  # Initialize the variable
+    setup_screenshots()
     while True:
         try:
             clipboard_content = pyperclip.paste()
             if clipboard_content and clipboard_content != last_clipboard_content:
                 last_clipboard_content = clipboard_content
                 process_name, window_handle, window_title = get_active_window()
-                log_event("Clipboard Used", process_name, window_handle, window_title, "", "", f"Copied: {clipboard_content[:30]}...")
-                take_screenshot(process_name, window_handle, window_title, "Clipboard Activity Detected")
+                log_event("Clipboard Used", process_name, window_handle, window_title, "", "", "Suspicious Activity")
+                log_suspicious_activity("Clipboard Paste")
+                take_screenshot("clipboard")  # Add screenshot
         except Exception as e:
-            print(f"Clipboard Monitoring Error: {str(e)}")
+            print(f"Clipboard error: {str(e)}")
         time.sleep(0.1)
 
-# **Tab Switch Detection**
-# **Tab Switch & Window Switch Detection (Multi-tab Apps)**
-# **Enhanced Universal Tab & Window Switch Detection**
-# Global Variables
-last_window_handle = None
-last_window_title = None
-last_process_name = None
-known_windows = {}
-
-def detect_tab_switches():
-    global last_window_handle, last_window_title, last_process_name
-
-    while True:
-        process_name, window_handle, window_title = get_active_window()
-
-        # Ensure we have initialized values
-        if last_process_name is None:
-            last_process_name = process_name
-        if last_window_handle is None:
-            last_window_handle = window_handle
-        if last_window_title is None:
-            last_window_title = window_title
-
-        # **Detect a new app window (window switch)**
-        if process_name != last_process_name:
-            log_event("Window Switch Detected", process_name, window_handle, window_title, "", "", "Suspicious Activity")
-            # Take a screenshot only if the new process is not python3.11.exe
-            if process_name != "python3.11.exe":
-                take_screenshot(process_name, window_handle, window_title, "Window Switch Detected")
-
-        # **Detect tab switches within the same app**
-        elif window_handle == last_window_handle and window_title != last_window_title:
-            log_event("Tab Switch Detected", process_name, window_handle, window_title, "", "", "Suspicious Activity")
-            take_screenshot(process_name, window_handle, window_title, "Tab Switch Detected")
-
-        # **Update last known values**
-        last_window_handle = window_handle
-        last_window_title = window_title
-        last_process_name = process_name
-
-        time.sleep(0.05)  # Small delay to prevent high CPU usage
-
-
-# **Get Active Window Process Name**
+# ✅ Get Active Window Process Name
 def get_active_window():
+    """Returns the currently active window's process name, handle, and title."""
     try:
         hwnd = win32gui.GetForegroundWindow()
         if hwnd == 0:
-            return None, None, None
+            return "Unknown", None, "Unknown Window"
+
         _, pid = win32process.GetWindowThreadProcessId(hwnd)
         process = psutil.Process(pid)
         process_name = process.name().lower()
         window_title = win32gui.GetWindowText(hwnd)
+
         return process_name, hwnd, window_title
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        return None, None, None
-
-# **Network Monitoring**
-def monitor_network():
-    while True:
-        try:
-            for conn in psutil.net_connections(kind='inet'):
-                if conn.status == 'ESTABLISHED' and conn.raddr:
-                    remote_ip = conn.raddr.ip
-                    domain = get_domain_from_ip(remote_ip)
-                    process_name, window_handle, window_title = get_active_window()
-                    log_event("Network Activity", process_name, window_handle, window_title, remote_ip, domain, "Monitoring")
-        except Exception as e:
-            print(f"Network Monitoring Error: {str(e)}")
-        time.sleep(0.1)
-
-# **Resolve IP to Domain Name**
-def get_domain_from_ip(ip):
-    try:
-        return socket.gethostbyaddr(ip)[0]
-    except (socket.herror, socket.gaierror):
-        return "Unknown"
-
-# **Keyboard & Mouse Event Handling**
-def on_key_press(key):
-    process_name, window_handle, window_title = get_active_window()
-    log_event("Key Pressed", process_name, window_handle, window_title, "", "", f"Key: {key}")
-
-def on_click(x, y, button, pressed):
-    if pressed:
-        process_name, window_handle, window_title = get_active_window()
-        log_event("Mouse Click", process_name, window_handle, window_title, "", "", f"Button: {button}")
-
-# **Start Monitoring**
-def start_monitoring():
-    log_event("Monitoring Started", "", "", "", "", "", "System Initialized")
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return "Unknown", None, "Unknown Window"
     
-    threads = [
-        Thread(target=monitor_processes, daemon=True),
-        Thread(target=monitor_clipboard, daemon=True),
-        Thread(target=detect_tab_switches, daemon=True),
-        Thread(target=monitor_network, daemon=True),
-    ]
-    for thread in threads:
-        thread.start()
+def log_suspicious_activity(event_type):
+    """Send detected events to the risk scoring system."""
+    event_stream.put(event_type)
 
+def get_domain_from_ip(ip_address):
+    """Resolves a domain name from an IP address."""
+    try:
+        domain_name = socket.gethostbyaddr(ip_address)[0]
+        return domain_name
+    except socket.herror:
+        return "Unknown Domain"
 
-    with keyboard.Listener(on_press=on_key_press) as key_listener, \
-         mouse.Listener(on_click=on_click) as mouse_listener:
-        key_listener.join()
-        mouse_listener.join()
+SCREENSHOT_DIR = "screenshots"
+SCREENSHOT_COUNTER = 0
 
+def setup_screenshots():
+    """Create screenshot directory if not exists"""
+    if not os.path.exists(SCREENSHOT_DIR):
+        os.makedirs(SCREENSHOT_DIR)
+    global SCREENSHOT_COUNTER
+    SCREENSHOT_COUNTER = len(os.listdir(SCREENSHOT_DIR)) if os.path.exists(SCREENSHOT_DIR) else 0
+
+def take_screenshot(reason):
+    """Capture screenshot of active window with timestamp"""
+    global SCREENSHOT_COUNTER
+    try:
+        # Get active window dimensions
+        hwnd = win32gui.GetForegroundWindow()
+        rect = win32gui.GetWindowRect(hwnd)
+        
+        # Capture only the active window
+        screenshot = ImageGrab.grab(rect)
+        
+        # Generate filename
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        filename = f"{SCREENSHOT_DIR}/{timestamp}_{reason}_{SCREENSHOT_COUNTER}.png"
+        
+        screenshot.save(filename)
+        SCREENSHOT_COUNTER += 1
+        return filename
+    except Exception as e:
+        print(f"Screenshot failed: {str(e)}")
+        return None
+
+# ✅ Start Monitoring
+def start_monitoring():
+    setup_screenshots()
+    log_event("Monitoring Started", "", "", "", "", "", "System Initialized")
+
+    # Start risk monitoring in a separate thread
+    start_risk_monitoring(event_stream)
+
+    # Start monitoring functions
+    threading.Thread(target=monitor_processes, daemon=True).start()
+    threading.Thread(target=monitor_clipboard, daemon=True).start()
+    threading.Thread(target=detect_tab_switches, daemon=True).start()
+    threading.Thread(target=monitor_network, daemon=True).start()
+
+# ✅ Run Monitoring if executed directly
 if __name__ == '__main__':
     print("\nStarting Student Proctoring System...\n")
-    start_monitoring()  # ✅ Will only run if main.py is executed directly
+    start_monitoring()
