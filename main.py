@@ -10,7 +10,7 @@ import socket
 from pynput import keyboard, mouse
 import threading
 import re
-import tldextract
+# Removed tldextract as it's no longer used
 from risk_score import risk_queue, warning_queue
 from tkinter import messagebox
 from risk_score import start_risk_monitoring, risk_queue
@@ -19,7 +19,6 @@ event_stream = queue.Queue()
 from PIL import ImageGrab
 import ctypes
 import ctypes.wintypes
-tld_extractor = tldextract.TLDExtract(include_psl_private_domains=True)
 
 # ✅ User-defined whitelisted processes (converted to lowercase)
 WHITELISTED_PROCESSES = [
@@ -30,7 +29,10 @@ WHITELISTED_PROCESSES = [
 # ✅ Critical System Processes (Never Terminate)
 CRITICAL_SYSTEM_PROCESSES = [
     "explorer.exe", "winlogon.exe", "taskmgr.exe", "csrss.exe", "services.exe",
-    "svchost.exe", "lsass.exe", "dwm.exe", "system", "smss.exe", "textinputhost.exe"
+    "svchost.exe", "lsass.exe", "dwm.exe", "system", "smss.exe", "textinputhost.exe",
+    "svchost.exe", "searchhost.exe", "mpdefendercoreservice.exe",
+    "dllhost.exe", "runtimebroker.exe", "services.exe",
+    "lsass.exe", "smss.exe", "csrss.exe", "wininit.exe"
 ]
 
 # ✅ Logging setup
@@ -57,7 +59,47 @@ def get_current_desktop_number():
         return int.from_bytes(buffer.raw, byteorder='little')
     except:
         return 1
+
+# Add these functions before start_monitoring()
+
+def on_key_press(key):
+    try:
+        key_str = key.char
+    except AttributeError:
+        key_str = str(key).split('.')[-1]
     
+    process_name, hwnd, window_title = get_active_window()
+    log_event(
+        "Keyboard Input",
+        process_name,
+        hwnd,
+        window_title,
+        action_taken=f"Key pressed: {key_str}"
+    )
+
+def on_mouse_click(x, y, button, pressed):
+    if pressed:
+        process_name, hwnd, window_title = get_active_window()
+        log_event(
+            "Mouse Activity",
+            process_name,
+            hwnd,
+            window_title,
+            action_taken=f"{button.name.capitalize()} click at ({x}, {y})"
+        )
+
+def start_input_monitoring():
+    """Start monitoring keyboard and mouse inputs"""
+    keyboard_listener = keyboard.Listener(on_press=on_key_press)
+    mouse_listener = mouse.Listener(on_click=on_mouse_click)
+    
+    keyboard_listener.start()
+    mouse_listener.start()
+    
+    # Keep references to prevent garbage collection
+    while True:
+        time.sleep(1)
+
 # ✅ Log event function
 def log_event(event, process_name="", window_handle=None, window_title=None, ip_address="", domain="", action_taken=""):
     """Logs all system activities in a CSV file and prints them to the console."""
@@ -113,11 +155,6 @@ def monitor_processes():
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
 
-        time.sleep(0.05) 
-
-# ✅ Clipboard Monitoring
-
-
 def detect_tab_switches():
     global last_window_handle, last_window_title
     setup_screenshots()
@@ -148,83 +185,57 @@ def detect_tab_switches():
             
         except Exception as e:
             print(f"Tab switch error: {str(e)}")
-            
-        time.sleep(0.1)
 
 def get_domain_from_ip(ip_address):
-    """Improved domain simplification with AWS/GCP detection"""
+    """Return the full domain name from a given IP address using DNS lookup"""
     try:
-        # First try reverse DNS
-        domain_name = socket.gethostbyaddr(ip_address)[0]
-        extracted = tld_extractor(domain_name)
-        
-        # Handle AWS/GCP domains
-        if 'compute.amazonaws' in domain_name:
-            parts = domain_name.split('.')
-            return f"{parts[-4]}.{'.'.join(parts[-3:])}" if len(parts) >=4 else domain_name
-        if 'googleusercontent' in domain_name:
-            return "googleusercontent.com"
-        
-        # Return simplified domain
-        if extracted.suffix:
-            return f"{extracted.domain}.{extracted.suffix}"
-        return extracted.domain if extracted.domain else ip_address
+        return socket.gethostbyaddr(ip_address)[0]
     except (socket.herror, socket.gaierror):
-        return ip_address
-    except Exception as e:
-        print(f"Domain Error: {str(e)}")
-        return ip_address
+        return ip_address  # Return IP if resolution fails
 
-# Modified network monitoring section
 def monitor_network():
-    extract = tldextract.extract
+    """Network monitoring using DNS lookup for domain names.
+       Logs new connections (based on IP, port, and PID) so that persistent connections aren’t repeatedly logged.
+    """
+    seen_connections = set()
     while True:
         try:
-            current_process, hwnd, window_title = get_active_window()
-            
+            current_proc, hwnd, window_title = get_active_window()
             for conn in psutil.net_connections(kind='inet'):
                 if conn.status == 'ESTABLISHED' and conn.raddr:
                     try:
                         process = psutil.Process(conn.pid)
+                        proc_name = process.name().lower()
+                        
+                        # Skip critical system processes
+                        if proc_name in CRITICAL_SYSTEM_PROCESSES:
+                            continue
+                            
                         remote_ip = conn.raddr[0]
                         remote_port = conn.raddr[1]
                         
-                        # Get domain from browser title if possible
-                        domain = ""
-                        if "chrome.exe" in process.name().lower():
-                            if " - Google Chrome" in window_title:
-                                url_part = window_title.split(" - Google Chrome")[0]
-                                extracted = extract(url_part)
-                                domain = f"{extracted.domain}.{extracted.suffix}"
-                        elif "firefox.exe" in process.name().lower():
-                            if " - Mozilla Firefox" in window_title:
-                                url_part = window_title.split(" - Mozilla Firefox")[0]
-                                extracted = extract(url_part)
-                                domain = f"{extracted.domain}.{extracted.suffix}"
+                        # Use DNS lookup to get the domain name (always do this)
+                        domain = get_domain_from_ip(remote_ip)
                         
-                        # Fallback to DNS lookup
-                        if not domain:
-                            domain = get_domain_from_ip(remote_ip)
-
-                        # Log network activity separately
-                        log_event(
-                            "Network Connection",
-                            process.name(),
-                            hwnd,
-                            window_title,
-                            f"{remote_ip}:{remote_port}",
-                            domain,
-                            "Monitoring"
-                        )
-
+                        # Create a unique key for this connection
+                        key = (remote_ip, remote_port, conn.pid)
+                        if key not in seen_connections:
+                            seen_connections.add(key)
+                            log_event(
+                                "Network Connection",
+                                proc_name,
+                                hwnd,
+                                window_title,
+                                f"{remote_ip}:{remote_port}",
+                                domain,
+                                "Monitoring"
+                            )
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         continue
-
         except Exception as e:
-            print(f"Network monitoring error: {str(e)}")
-        
-        time.sleep(0.5)
-      
+            print(f"Network Error: {str(e)}")
+        time.sleep(1)
+
 last_window_handle = None
 last_window_title = None
 
@@ -243,7 +254,6 @@ def monitor_clipboard():
                 take_screenshot("clipboard")  # Add screenshot
         except Exception as e:
             print(f"Clipboard error: {str(e)}")
-        time.sleep(0.1)
 
 # ✅ Get Active Window Process Name
 def get_active_window():
@@ -265,14 +275,6 @@ def get_active_window():
 def log_suspicious_activity(event_type):
     """Send detected events to the risk scoring system."""
     event_stream.put(event_type)
-
-def get_domain_from_ip(ip_address):
-    """Resolves a domain name from an IP address."""
-    try:
-        domain_name = socket.gethostbyaddr(ip_address)[0]
-        return domain_name
-    except socket.herror:
-        return "Unknown Domain"
 
 SCREENSHOT_DIR = "screenshots"
 SCREENSHOT_COUNTER = 0
@@ -319,6 +321,7 @@ def start_monitoring():
     threading.Thread(target=monitor_clipboard, daemon=True).start()
     threading.Thread(target=detect_tab_switches, daemon=True).start()
     threading.Thread(target=monitor_network, daemon=True).start()
+    threading.Thread(target=start_input_monitoring, daemon=True).start()  
 
 # ✅ Run Monitoring if executed directly
 if __name__ == '__main__':
